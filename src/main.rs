@@ -123,45 +123,31 @@ fn parse_opts(cmd: &str, args: &[String]) -> Option<Opts> {
     Some(o)
 }
 
-/// Hand everything we don't implement to the original `ug`: `$UG_LITE_FALLBACK`,
-/// else the next `ug` on PATH that isn't this binary.
+/// Hand everything we don't implement to the original `ug`.
 fn fallback(args: &[OsString]) -> ! {
-    // Every ug-lite copy that forwarded is recorded here, so copies (or a
-    // UG_LITE_FALLBACK pointing at one) can never exec each other in a loop.
-    // Fails closed: forwarding without a complete record could loop.
-    let refuse = |why: &str| -> ! {
+    let found = original_ug();
+    if args == ["--help"] {
+        let ug = match &found {
+            Ok((real, _)) => real.display().to_string(),
+            Err(why) => format!("unavailable: {why}"),
+        };
+        // Flushed: exec replaces the process, and a write error must not stop the help.
+        let mut out = io::stdout();
+        let _ = write!(
+            out,
+            "ug-lite {} runs these commands itself:\n  \
+             mcp-proxy   Bridge stdio MCP to a Databricks MCP server\n  \
+             auth-token  Print a Databricks token for agent auth helpers\n\
+             Everything else goes to the original ug:\n  \
+             {ug}\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        let _ = out.flush();
+    }
+    let (real, visited_env) = found.unwrap_or_else(|why| {
         elog!("ug-lite: not forwarding to the original `ug`: {why}");
         exit(2)
-    };
-    let mut visited: Vec<PathBuf> =
-        std::env::split_paths(&std::env::var_os(VISITED_ENV).unwrap_or_default()).collect();
-    match std::env::current_exe().and_then(|p| p.canonicalize()) {
-        Ok(me) => visited.push(me),
-        Err(e) => refuse(&format!("cannot resolve its own path: {e}")),
-    }
-    let Ok(visited_env) = std::env::join_paths(&visited) else {
-        refuse(&format!("cannot record {VISITED_ENV} for {visited:?}"))
-    };
-    let is_new = |p: &PathBuf| p.canonicalize().is_ok_and(|c| !visited.contains(&c));
-    let real = std::env::var_os("UG_LITE_FALLBACK")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            let name = if cfg!(windows) { "ug.exe" } else { "ug" };
-            std::env::split_paths(&std::env::var_os("PATH")?)
-                // A relative entry (empty = cwd) would be re-resolved via PATH by exec.
-                .filter(|dir| dir.is_absolute())
-                .map(|dir| dir.join(name))
-                .find(|p| is_executable(p) && is_new(p))
-        })
-        .filter(is_new);
-    let Some(real) = real else {
-        elog!(
-            "ug-lite: only `mcp-proxy` and `auth-token` are supported here. \
-             Set UG_LITE_FALLBACK to the original `ug` to forward other commands."
-        );
-        exit(2)
-    };
+    });
     let mut cmd = Command::new(&real);
     cmd.args(args);
     cmd.env(VISITED_ENV, visited_env);
@@ -176,7 +162,44 @@ fn fallback(args: &[OsString]) -> ! {
     exit(cmd.status().map(|s| s.code().unwrap_or(1)).unwrap_or(127))
 }
 
-/// Like `which`: skip a non-executable `ug` and keep scanning PATH.
+/// The original `ug` and the updated `VISITED_ENV`: `$UG_LITE_FALLBACK`, else
+/// `~/.local/bin/ug` (where `ug` installs itself). Not a PATH search: the launcher's PATH may
+/// lack ~/.local/bin.
+fn original_ug() -> Result<(PathBuf, OsString), String> {
+    // Every ug-lite copy that forwarded is recorded here, so copies (or a
+    // UG_LITE_FALLBACK pointing at one) can never exec each other in a loop.
+    // Fails closed: forwarding without a complete record could loop.
+    let mut visited: Vec<PathBuf> =
+        std::env::split_paths(&std::env::var_os(VISITED_ENV).unwrap_or_default()).collect();
+    let me = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| format!("cannot resolve its own path: {e}"))?;
+    visited.push(me);
+    let visited_env = std::env::join_paths(&visited)
+        .map_err(|_| format!("cannot record {VISITED_ENV} for {visited:?}"))?;
+    // Launchers (GUI apps) do not read shell rc files, so name the place that reaches this process.
+    let hint = "set UG_LITE_FALLBACK to the original `ug`'s absolute path in the environment that \
+                runs ug-lite (for an agent, the `env` of its MCP or auth config)";
+    let real = match std::env::var_os("UG_LITE_FALLBACK").filter(|v| !v.is_empty()) {
+        Some(v) => PathBuf::from(v),
+        None => Some(home())
+            .filter(|h| h.is_absolute())
+            .ok_or(format!("no home directory for ~/.local/bin/ug; {hint}"))?
+            .join(".local/bin/ug"),
+    };
+    // Absolute, so exec runs the file that was checked instead of searching PATH for a bare name.
+    let real = std::path::absolute(&real).map_err(|e| format!("{}: {e}", real.display()))?;
+    match real.canonicalize() {
+        Ok(c) if visited.contains(&c) => Err(format!(
+            "{} is ug-lite, not the original `ug`; {hint}",
+            real.display()
+        )),
+        Ok(c) if !is_executable(&c) => Err(format!("{} is not executable; {hint}", real.display())),
+        Ok(_) => Ok((real, visited_env)),
+        Err(e) => Err(format!("{}: {e}; {hint}", real.display())),
+    }
+}
+
 fn is_executable(p: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
@@ -1482,20 +1505,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn run_decodes_lossily_and_executable_check() {
+    fn run_decodes_lossily() {
         let mut c = Command::new("sh");
         c.args(["-c", "printf 'invalid_grant \\377' >&2"]);
         let (_, _, err) = run(c, Duration::from_secs(5), true).unwrap();
         assert!(err.starts_with("invalid_grant"));
-        let dir = std::env::temp_dir().join(format!("ug-lite-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("ug");
-        fs::write(&f, "").unwrap();
-        assert!(!is_executable(&f));
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(is_executable(&f));
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -38,10 +38,9 @@ main() {
   if ! { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; }; then sudo=sudo; fi
   $sudo mkdir -p "$dir"
   $sudo install -m 755 "$tmp/ug-lite" "$dir/ug-lite"
-  bin="$(cd "$dir" && pwd)/ug-lite" # absolute, so the printed link works from anywhere
+  bin="$(cd "$dir" && pwd)/ug-lite" # absolute, so the printed command works from anywhere
   echo "Installed ug-lite to $bin"
-  echo "To use it as ug, run this and put ~/.ug-lite/bin ahead of the original ug on PATH:"
-  echo "  mkdir -p ~/.ug-lite/bin && ln -sf '$bin' ~/.ug-lite/bin/ug"
+  echo "Use it in agent configs in place of ug, for example: $bin mcp-proxy --url <URL>"
 }
 
 main

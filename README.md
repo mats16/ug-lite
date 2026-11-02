@@ -7,7 +7,21 @@
 | `ug mcp-proxy --url <URL> [--host] [--profile] [--use-pat]` | stdio MCP ⇔ Databricks streamable-HTTP MCP のブリッジ。リクエストごとにトークンを注入 |
 | `ug auth-token [--host] [--profile] [--use-pat] [--force-refresh] [--browser-login]` | Claude Code の `apiKeyHelper` や Codex の auth command 向けにトークンを出力 |
 
-それ以外のサブコマンドやフラグ（`configure`、`--help`、`--client-id` など）は、元の Python 版 `ug` にそのまま `exec` で引き渡します。
+それ以外のサブコマンドやフラグ（`configure`、`--version`、`--client-id` など）は、元の Python 版 `ug` にそのまま `exec` で引き渡します。
+
+`ug-lite --help` だけは、元の `ug` のヘルプの前に、ug-lite のバージョン、ug-lite が処理するコマンド、引き渡し先の `ug` のパスを stdout に表示します（`ug-lite configure --help` などサブコマンドのヘルプは元の `ug` のままです）。`ug-lite --version`（`-V`）は、ランチャーが起動のたびに読む出力なので、何も足さずに元の `ug` に引き渡します。
+
+```text
+$ ug-lite --help
+ug-lite 0.1.0 runs these commands itself:
+  mcp-proxy   Bridge stdio MCP to a Databricks MCP server
+  auth-token  Print a Databricks token for agent auth helpers
+Everything else goes to the original ug:
+  /Users/you/.local/bin/ug
+
+ Usage: ug [OPTIONS] COMMAND [ARGS]...
+ ...
+```
 
 ## 計測 (macOS / Apple Silicon, `system.ai.dbsql` に対して initialize + tools/list)
 
@@ -20,7 +34,7 @@
 
 ## インストール
 
-最新リリースのバイナリ（macOS arm64、Linux x86_64 / arm64）を `~/.local/bin/ug-lite` にインストールします。
+最新リリースのバイナリ（macOS arm64、Linux x86_64 / arm64）を `~/.local/bin/ug-lite` にインストールします。元の `ug`（`~/.local/bin/ug`）には手を触れません。
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mats16/ug-lite/main/install.sh | sh
@@ -32,15 +46,27 @@ curl -fsSL https://raw.githubusercontent.com/mats16/ug-lite/main/install.sh | sh
 curl -fsSL https://raw.githubusercontent.com/mats16/ug-lite/main/install.sh | UG_LITE_INSTALL_DIR=/usr/local/bin sh
 ```
 
-インストールが終わると、`ug` という名前で使うためのリンクを作るコマンドが表示されます。それを実行し、`~/.ug-lite/bin` を元の `ug`（`~/.local/bin/ug`）より前の PATH に置きます（`~/.zshrc` などに書いておきます）。
+## 使い方
 
-```sh
-export PATH="$HOME/.ug-lite/bin:$PATH"
+エージェント設定で、`ug` の代わりに `ug-lite` を指定します。引数は `ug` と同じです。例: Codex の `~/.codex/config.toml`
+
+```toml
+[mcp_servers.slack]
+command = "/Users/you/.local/bin/ug-lite"
+args = ["mcp-proxy", "--url", "https://<workspace>/ai-gateway/mcp-services/system.ai.slack", "--host", "https://<workspace>"]
 ```
 
-`ug configure` や `ug claude` などはエージェント設定に `shutil.which("ug")` の絶対パスを書き込むため、PATH の先頭に置いておけば次回の設定更新から ug-lite が使われます。既存の設定ファイル（例: `~/.codex/config.toml`）の `command = ".../ug"` を書き換えても構いません。
+`ug configure` や `ug claude` などは設定に `ug` の絶対パスを書き込むので、実行したあとは `ug-lite` に書き換え直してください。
 
-フォールバック先は `$UG_LITE_FALLBACK`（元の `ug` の絶対パス）です。未設定なら、PATH 上で ug-lite 以外の最初の実行可能な `ug` を使います。ug-lite 同士が呼び合うことはありません。
+ug-lite が扱わないコマンドは、`$UG_LITE_FALLBACK`（元の `ug` の絶対パス。`~` は展開されません）に引き渡します。未設定なら `~/.local/bin/ug`（`ug` 自身のインストール先）を使います。PATH は探さないので、起動元（GUI アプリなど）の PATH に `~/.local/bin` がなくても動きます。`ug` を別の場所に入れた場合は `UG_LITE_FALLBACK` を設定してください。ug-lite は起動されるたびにこの変数を読むので、インストール時ではなく、ug-lite を起動する環境に設定します。エージェントから起動する場合は、そのエージェント設定の `env` に書くのが確実です（GUI アプリはシェルの設定ファイルを読みません）。例: Codex なら `[mcp_servers.slack]` に `env = { UG_LITE_FALLBACK = "/opt/ug/bin/ug" }`。引き渡し先がない、実行できない、ug-lite 自身を指す場合は、理由を stderr に出して exit 2 で終わります。ug-lite 同士が呼び合うことはありません。
+
+### v0.1.0 からの更新
+
+インストーラーを、v0.1.0 を入れたときと同じ `UG_LITE_INSTALL_DIR`（指定しなかった場合はなし）で再実行すると、ug-lite が新しいバージョンに置き換わります。
+
+引き渡し先の探し方が、「PATH 上の次の `ug`」から「`$UG_LITE_FALLBACK`、なければ `~/.local/bin/ug`」に変わりました。元の `ug` が `~/.local/bin/ug` 以外にある場合は、上のとおり `UG_LITE_FALLBACK` を設定してください。設定しないと、引き渡すコマンドが exit 2 で終わります。
+
+v0.1.0 の案内どおり `~/.ug-lite/bin/ug` のリンクを PATH の先頭に置いている場合は、`ug` も引き続き ug-lite になります。`ug` を元の `ug` に戻したい場合は、そのリンクと PATH の設定を消し、エージェント設定で `ug-lite` を直接指定してください。
 
 ## 元の実装と同じ挙動
 
