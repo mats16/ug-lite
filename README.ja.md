@@ -15,7 +15,7 @@
 
 ```text
 $ ug-lite --help
-ug-lite 0.1.0 runs these commands itself:
+ug-lite 0.1.1 runs these commands itself:
   mcp-proxy   Bridge stdio MCP to a Databricks MCP server
   auth-token  Print a Databricks token for agent auth helpers
 Everything else goes to the original ug:
