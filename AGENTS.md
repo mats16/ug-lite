@@ -15,7 +15,7 @@ cargo fmt --check                          # 整形
 cargo clippy --all-targets -- -D warnings  # lint。警告もエラーにする
 ```
 
-変更を終える前に `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` をすべて通してください。PR でテストを走らせる CI はないので、手元で確認します（`.github/workflows/pullfrog.yml` は手動起動のエージェント用です）。
+変更を終える前に `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` をすべて通してください。PR でテストを走らせる CI はないので、手元で確認します（`.github/workflows/pullfrog.yml` は手動起動のエージェント用、`release.yml` は `vX.Y.Z` タグの push でテストしてからリリースを作ります）。
 
 ## 構成
 
