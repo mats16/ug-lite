@@ -13,6 +13,14 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Best-effort stderr: `eprintln!` panics when stderr is gone, and panic = abort would then
+/// kill the proxy with requests in flight.
+macro_rules! elog {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(io::stderr(), $($arg)*);
+    }};
+}
+
 const AUTH_FAILURE_EXIT_CODE: i32 = 2;
 const VISITED_ENV: &str = "UG_LITE_VISITED";
 // Codes ug-lite answers transport failures with (README); the same ones the MCP SDK picks.
@@ -122,7 +130,7 @@ fn fallback(args: &[OsString]) -> ! {
     // UG_LITE_FALLBACK pointing at one) can never exec each other in a loop.
     // Fails closed: forwarding without a complete record could loop.
     let refuse = |why: &str| -> ! {
-        eprintln!("ug-lite: not forwarding to the original `ug`: {why}");
+        elog!("ug-lite: not forwarding to the original `ug`: {why}");
         exit(2)
     };
     let mut visited: Vec<PathBuf> =
@@ -148,7 +156,7 @@ fn fallback(args: &[OsString]) -> ! {
         })
         .filter(is_new);
     let Some(real) = real else {
-        eprintln!(
+        elog!(
             "ug-lite: only `mcp-proxy` and `auth-token` are supported here. \
              Set UG_LITE_FALLBACK to the original `ug` to forward other commands."
         );
@@ -161,7 +169,7 @@ fn fallback(args: &[OsString]) -> ! {
     {
         use std::os::unix::process::CommandExt;
         let err = cmd.exec();
-        eprintln!("ug-lite: could not run {}: {err}", real.display());
+        elog!("ug-lite: could not run {}: {err}", real.display());
         exit(127)
     }
     #[cfg(not(unix))]
@@ -230,7 +238,7 @@ fn truthy(v: &Value) -> bool {
 fn auth_token(o: Opts, state: State) {
     let explicit_host = o.host.is_some();
     let Some(workspace) = o.host.or(state.workspace) else {
-        eprintln!("No workspace configured. Run `ug configure` first.");
+        elog!("No workspace configured. Run `ug configure` first.");
         exit(1)
     };
     let profile = if o.profile.is_none() && !explicit_host {
@@ -243,7 +251,7 @@ fn auth_token(o: Opts, state: State) {
         Ok(a) => a,
         Err(profile) => {
             let p = profile.as_deref();
-            eprintln!(
+            elog!(
                 "--use-pat: no personal access token available for profile '{}'. Add a \
                  `token = <PAT>` entry under [{}] in ~/.databrickscfg, or re-run `ug configure` \
                  without --use-pat to use OAuth.",
@@ -255,9 +263,14 @@ fn auth_token(o: Opts, state: State) {
     };
     match auth.token(o.force_refresh) {
         // Only the bare token may reach stdout: the agent reads all of it as the credential.
-        Ok(t) => println!("{t}"),
+        Ok(t) => {
+            // A closed stdout is a failed helper call, not a panic.
+            if writeln!(io::stdout(), "{t}").is_err() {
+                exit(1)
+            }
+        }
         Err(e) => {
-            eprintln!("{e}");
+            elog!("{e}");
             exit(1)
         }
     }
@@ -706,7 +719,7 @@ struct Proxy {
 
 fn fail_fast(msg: &str) -> ! {
     // stdout is the MCP wire, so diagnostics go to stderr (clients show it on failure).
-    eprintln!("ug mcp-proxy: {msg}");
+    elog!("ug mcp-proxy: {msg}");
     exit(AUTH_FAILURE_EXIT_CODE)
 }
 
@@ -749,7 +762,7 @@ fn root_certs() -> ureq::tls::RootCerts {
 
 fn mcp_proxy(o: Opts, state: State) {
     let Some(workspace) = o.host.or(state.workspace) else {
-        eprintln!("No workspace configured. Run `ug configure` first.");
+        elog!("No workspace configured. Run `ug configure` first.");
         exit(1)
     };
     let profile = o.profile.or(state.profile);
@@ -801,7 +814,7 @@ fn mcp_proxy(o: Opts, state: State) {
         let msg = match msg {
             Ok(v) => v,
             Err((code, e)) => {
-                eprintln!("ug mcp-proxy: rejected a client message: {e}");
+                elog!("ug mcp-proxy: rejected a client message: {e}");
                 proxy.write(
                     &json!({"jsonrpc": "2.0", "id": null, "error": {"code": code, "message": e}}),
                 );
@@ -815,7 +828,7 @@ fn mcp_proxy(o: Opts, state: State) {
             // Out of threads must not abort the proxy (panic = abort): answer this request.
             if let Err(e) = thread::Builder::new().spawn(move || p.post(msg)) {
                 let e = format!("cannot start a thread for this request: {e}");
-                eprintln!("ug mcp-proxy: {e}");
+                elog!("ug mcp-proxy: {e}");
                 proxy.write(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": INTERNAL_ERROR, "message": e}}));
             }
         } else {
@@ -830,7 +843,7 @@ impl Proxy {
         let request_id = msg.get("method").and(msg.get("id")).cloned();
         let is_init = msg["method"] == "initialize";
         if let Err((code, e)) = self.send(&msg, request_id.as_ref(), is_init) {
-            eprintln!("ug mcp-proxy: {e}");
+            elog!("ug mcp-proxy: {e}");
             if let Some(id) = request_id {
                 self.write(
                     &json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": e}}),
@@ -839,19 +852,25 @@ impl Proxy {
         }
     }
 
-    /// `session` is the session id to send (none on initialize, which starts a new one).
+    /// Each MCP header follows its own rule: `mcp-session-id` whenever one was assigned,
+    /// `mcp-protocol-version` on every request after a negotiation, whether or not the server
+    /// uses sessions. An initialize (`is_init`) starts over and sends neither.
     fn request(
         &self,
         req: ureq::RequestBuilder<ureq::typestate::WithBody>,
         token: &str,
         session: Option<&str>,
+        is_init: bool,
     ) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
         let mut req = req.header("Authorization", format!("Bearer {token}"));
+        if is_init {
+            return req;
+        }
         if let Some(s) = session {
             req = req.header("mcp-session-id", s);
-            if let Some(v) = self.protocol.lock().unwrap().as_deref() {
-                req = req.header("mcp-protocol-version", v);
-            }
+        }
+        if let Some(v) = self.protocol.lock().unwrap().as_deref() {
+            req = req.header("mcp-protocol-version", v);
         }
         req
     }
@@ -873,7 +892,7 @@ impl Proxy {
             .then(|| self.session.lock().unwrap().clone())
             .flatten();
         let resp = self
-            .request(self.http.post(&self.url), &token, sent.as_deref())
+            .request(self.http.post(&self.url), &token, sent.as_deref(), is_init)
             .header("Accept", "application/json, text/event-stream")
             .header("Content-Type", "application/json")
             .send(msg.to_string())
@@ -1017,6 +1036,7 @@ impl Proxy {
             self.http.delete(&self.url).force_send_body(),
             &token,
             Some(&session),
+            false,
         );
         let _ = req
             .config()
@@ -1573,6 +1593,15 @@ mod tests {
         p.post(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}));
         let req = seen.recv().unwrap();
         assert!(!req.contains("mcp-session-id") && !req.contains("mcp-protocol-version"));
+        // A sessionless server still gets the negotiated version on later requests.
+        let (url, seen) = mock_seen(accepted, Duration::ZERO);
+        let (p, _) = proxy_at(url);
+        *p.protocol.lock().unwrap() = Some("2025-06-18".into());
+        p.post(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        let req = seen.recv().unwrap();
+        assert!(
+            req.contains("mcp-protocol-version: 2025-06-18") && !req.contains("mcp-session-id")
+        );
         // Other messages carry both.
         let (url, seen) = mock_seen(accepted, Duration::ZERO);
         let (p, _) = with_session(url);
