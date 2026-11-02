@@ -1,0 +1,21 @@
+[package]
+name = "ug-lite"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "ug-lite"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+shlex = "2"
+# Blocking HTTP + rustls/ring: no async runtime, small RSS and instant startup.
+ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
