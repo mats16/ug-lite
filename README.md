@@ -20,11 +20,21 @@
 
 ## インストール
 
+最新リリースのバイナリ（macOS arm64、Linux x86_64 / arm64）を `~/.local/bin/ug-lite` にインストールします。
+
 ```sh
-cargo build --release
-mkdir -p ~/.ug-lite/bin
-ln -sf "$PWD/target/release/ug-lite" ~/.ug-lite/bin/ug
-# 元の ug (~/.local/bin/ug) より前に置く
+curl -fsSL https://raw.githubusercontent.com/mats16/ug-lite/main/install.sh | sh
+```
+
+`/usr/local/bin/ug-lite` に置く場合は `UG_LITE_INSTALL_DIR` で指定します（書き込めないディレクトリでは `sudo` を使います）。
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mats16/ug-lite/main/install.sh | UG_LITE_INSTALL_DIR=/usr/local/bin sh
+```
+
+インストールが終わると、`ug` という名前で使うためのリンクを作るコマンドが表示されます。それを実行し、`~/.ug-lite/bin` を元の `ug`（`~/.local/bin/ug`）より前の PATH に置きます（`~/.zshrc` などに書いておきます）。
+
+```sh
 export PATH="$HOME/.ug-lite/bin:$PATH"
 ```
 
